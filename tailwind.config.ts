@@ -9,28 +9,39 @@ export default {
   theme: {
     extend: {
       colors: {
-        background: '#0c0c0c',
-        card: '#1a1a1a',
-        primary: {
-          DEFAULT: '#f59e0b',
-          foreground: '#0c0c0c',
+        background: 'var(--background)',
+        foreground: 'var(--foreground)',
+        card: {
+          DEFAULT: 'var(--card)',
+          foreground: 'var(--card-foreground)',
         },
-        accent: {
-          DEFAULT: '#10b981',
-          orange: '#f97316',
+        primary: {
+          DEFAULT: 'var(--primary)',
+          foreground: 'var(--primary-foreground)',
+        },
+        secondary: {
+          DEFAULT: 'var(--secondary)',
+          foreground: 'var(--secondary-foreground)',
         },
         muted: {
-          DEFAULT: '#9ca3af',
-          foreground: '#6b7280',
+          DEFAULT: 'var(--muted)',
+          foreground: 'var(--muted-foreground)',
         },
+        accent: {
+          DEFAULT: 'var(--accent)',
+          foreground: 'var(--accent-foreground)',
+        },
+        destructive: 'var(--destructive)',
+        border: 'var(--border)',
+        input: 'var(--input)',
+        ring: 'var(--ring)',
       },
       borderRadius: {
-        lg: '0.5rem',
-        md: '0.375rem',
-        sm: '0.25rem',
+        lg: 'var(--radius)',
+        md: 'calc(var(--radius) - 2px)',
+        sm: 'calc(var(--radius) - 4px)',
       },
     },
   },
   plugins: [require('@tailwindcss/typography')],
 } satisfies Config
-
