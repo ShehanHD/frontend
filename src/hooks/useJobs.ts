@@ -3,7 +3,7 @@ import { toast } from 'sonner'
 import {
   fetchJobs, fetchJob, createJob, updateJob, deleteJob,
   fetchJobStages, reorderJobStages, deleteJobStage,
-  type JobCreatePayload, type JobUpdatePayload, type StagePositionItem,
+  type Job, type JobCreatePayload, type JobUpdatePayload, type StagePositionItem,
 } from '@/api/jobs'
 import { getApiErrorMessage } from '@/lib/apiError'
 
@@ -28,8 +28,20 @@ export function useUpdateJob() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: ({ id, payload }: { id: string; payload: JobUpdatePayload }) => updateJob(id, payload),
+    onMutate: async ({ id, payload }) => {
+      await queryClient.cancelQueries({ queryKey: ['jobs'] })
+      const prev = queryClient.getQueriesData<Job[]>({ queryKey: ['jobs'] })
+      queryClient.setQueriesData<Job[]>({ queryKey: ['jobs'] }, old =>
+        old?.map(j => j.id === id ? { ...j, ...payload } : j)
+      )
+      return { prev }
+    },
+    onError: (_err, _vars, context) => {
+      const ctx = context as { prev: [unknown[], Job[]][] } | undefined
+      ctx?.prev.forEach(([key, data]) => queryClient.setQueryData(key, data))
+      toast.error('Failed to update job')
+    },
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['jobs'] }); toast.success('Job updated') },
-    onError: () => toast.error('Failed to update job'),
   })
 }
 

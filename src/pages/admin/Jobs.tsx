@@ -93,8 +93,10 @@ function JobCard({ job }: { job: Job }) {
 }
 
 // --- Droppable Kanban Column ---
+const AUTO_COLLAPSE_STAGES = ['Archived', 'Delivered']
+
 function KanbanColumn({ stage, jobs }: { stage: JobStage; jobs: Job[] }) {
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(() => AUTO_COLLAPSE_STAGES.includes(stage.name))
   const { setNodeRef, isOver } = useDroppable({ id: stage.id })
 
   if (collapsed) {

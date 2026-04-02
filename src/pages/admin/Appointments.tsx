@@ -1,10 +1,10 @@
-import React, { useState, useRef, useEffect } from 'react'
-import { Calendar, dateFnsLocalizer, type View } from 'react-big-calendar'
-import { format, parse, startOfWeek, getDay, parseISO, addHours } from 'date-fns'
+import { useState, useMemo, useRef, useEffect } from 'react'
+import { Calendar, dateFnsLocalizer, type View, type ToolbarProps } from 'react-big-calendar'
+import { format, parse, startOfWeek, getDay, parseISO, addHours, formatDistanceToNow } from 'date-fns'
 import { enUS } from 'date-fns/locale'
 import 'react-big-calendar/lib/css/react-big-calendar.css'
-import { Plus, CheckCircle2, XCircle, CalendarDays } from 'lucide-react'
-import { useForm } from 'react-hook-form'
+import { Plus, CheckCircle2, XCircle, CalendarDays, X, CalendarPlus, ChevronLeft, ChevronRight } from 'lucide-react'
+import { useForm, useFieldArray, type SubmitHandler } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Button } from '@/components/ui/button'
@@ -19,8 +19,11 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useAppointments, useCreateAppointment, useUpdateAppointment, useDeleteAppointment } from '@/hooks/useAppointments'
 import { useSessionTypes } from '@/hooks/useSettings'
 import { useClients, useClient } from '@/hooks/useClients'
+import { useBookingRequests, useUpdateBookingRequest } from '@/hooks/useBookingRequests'
 import type { Appointment } from '@/schemas/appointments'
 import type { Client } from '@/schemas/clients'
+import type { BookingRequest } from '@/schemas/bookingRequests'
+import { SkeletonRow } from '@/components/ui/skeleton'
 
 const localizer = dateFnsLocalizer({
   format,
@@ -30,14 +33,17 @@ const localizer = dateFnsLocalizer({
   locales: { 'en-US': enUS },
 })
 
+const SessionSlotFormSchema = z.object({
+  session_type_id: z.string().uuid('Select a session type'),
+  date: z.string().min(1, 'Date is required'),
+  time_slot: z.enum(['morning', 'afternoon', 'evening', 'all_day']),
+  time: z.string().optional(),
+})
+
 const appointmentFormSchema = z.object({
   client_id: z.string().uuid('Select a client'),
   title: z.string().min(1, 'Title is required'),
-  starts_at: z.string().min(1, 'Start date is required'),
-  multi_day: z.boolean().default(false),
-  ends_at: z.string().optional(),
-  session_type_ids: z.array(z.string().uuid()).default([]),
-  session_time: z.enum(['morning', 'afternoon', 'evening']).optional().nullable(),
+  session_slots: z.array(SessionSlotFormSchema).min(1, 'At least one session slot is required'),
   location: z.string().optional().nullable(),
   status: z.enum(['pending', 'confirmed', 'cancelled']),
   addon_album: z.boolean().default(false),
@@ -45,10 +51,12 @@ const appointmentFormSchema = z.object({
   addon_enlarged_photos: z.boolean().default(false),
   deposit_paid: z.boolean().default(false),
   deposit_amount: z.string().optional(),
+  deposit_account_id: z.string().uuid().optional().nullable(),
   contract_signed: z.boolean().default(false),
   price: z.string().optional(),
   notes: z.string().optional().nullable(),
 })
+
 type AppointmentFormValues = z.infer<typeof appointmentFormSchema>
 
 function ClientCombobox({
@@ -115,11 +123,15 @@ interface AppointmentModalProps {
   open: boolean
   onClose: () => void
   appointment?: Appointment | null
+  prefill?: Partial<AppointmentFormValues>
+  onCreated?: () => void
+  onDelete?: (a: Appointment) => void
 }
 
-function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps) {
+function AppointmentModal({ open, onClose, appointment, prefill, onCreated, onDelete }: AppointmentModalProps) {
   const { data: sessionTypes = [] } = useSessionTypes()
-  const { data: existingClient } = useClient(appointment?.client_id ?? '')
+  const { data: existingClient } = useClient(appointment?.client_id ?? prefill?.client_id ?? '')
+  const { data: allAppointments = [] } = useAppointments()
   const createMutation = useCreateAppointment()
   const updateMutation = useUpdateAppointment()
 
@@ -129,6 +141,7 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
     reset,
     setValue,
     watch,
+    control,
     formState: { errors, isSubmitting },
   } = useForm<AppointmentFormValues>({
     resolver: zodResolver(appointmentFormSchema),
@@ -136,17 +149,51 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
       ? {
           client_id: appointment.client_id,
           title: appointment.title,
-          starts_at: appointment.starts_at.slice(0, 16),
-          ends_at: appointment.ends_at?.slice(0, 16) ?? undefined,
-          session_type_id: appointment.session_type_id,
+          session_slots: appointment.session_slots.length > 0
+            ? appointment.session_slots.map(s => ({
+                session_type_id: s.session_type_id,
+                date: s.date,
+                time_slot: s.time_slot as 'morning' | 'afternoon' | 'evening' | 'all_day',
+                time: s.time ?? undefined,
+              }))
+            : [{ session_type_id: '', date: '', time_slot: 'morning' as const, time: undefined }],
           location: appointment.location,
           status: appointment.status,
           notes: appointment.notes,
         }
-      : { status: 'pending' },
+      : {
+          status: 'pending',
+          session_slots: [{ session_type_id: '', date: '', time_slot: 'morning' as const, time: undefined }],
+        },
   })
 
   const clientId = watch('client_id')
+
+  const { fields: slotFields, append: appendSlot, remove: removeSlot } = useFieldArray({
+    control,
+    name: 'session_slots',
+  })
+
+  const isDateAllowed = (dateStr: string, availableDays: number[]): boolean => {
+    if (!dateStr || availableDays.length === 0) return true
+    const day = getDay(parseISO(dateStr)) // 0=Sun in date-fns
+    const normalized = day === 0 ? 6 : day - 1  // convert to 0=Mon
+    return availableDays.includes(normalized)
+  }
+
+  const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+  function deriveTimeSlot(time: string): 'morning' | 'afternoon' | 'evening' {
+    const h = parseInt(time.split(':')[0], 10)
+    if (h < 12) return 'morning'
+    if (h < 17) return 'afternoon'
+    return 'evening'
+  }
+
+  const getAvailableDays = (sessionTypeId: string): number[] => {
+    const st = sessionTypes.find(s => s.id === sessionTypeId)
+    return st?.available_days ?? []
+  }
 
   useEffect(() => {
     if (!open) return
@@ -154,11 +201,14 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
       reset({
         client_id: appointment.client_id,
         title: appointment.title,
-        starts_at: appointment.starts_at.slice(0, 10),
-        multi_day: !!appointment.ends_at,
-        ends_at: appointment.ends_at?.slice(0, 10) ?? undefined,
-        session_type_ids: appointment.session_type_ids ?? [],
-        session_time: appointment.session_time ?? undefined,
+        session_slots: appointment.session_slots.length > 0
+          ? appointment.session_slots.map(s => ({
+              session_type_id: s.session_type_id,
+              date: s.date,
+              time_slot: s.time_slot as 'morning' | 'afternoon' | 'evening' | 'all_day',
+              time: s.time ?? undefined,
+            }))
+          : [{ session_type_id: '', date: '', time_slot: 'morning' as const, time: undefined }],
         location: appointment.location ?? undefined,
         status: appointment.status,
         addon_album: appointment.addons.includes('album'),
@@ -171,11 +221,20 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
         notes: appointment.notes ?? undefined,
       })
     } else {
-      reset({ status: 'pending', multi_day: false, session_type_ids: [], addon_album: false, addon_thank_you_card: false, addon_enlarged_photos: false, deposit_paid: false, contract_signed: false })
+      reset({
+        status: 'pending',
+        session_slots: [{ session_type_id: '', date: '', time_slot: 'morning' as const, time: undefined }],
+        addon_album: false,
+        addon_thank_you_card: false,
+        addon_enlarged_photos: false,
+        deposit_paid: false,
+        contract_signed: false,
+        ...prefill,
+      })
     }
   }, [open, appointment?.id])
 
-  const onSubmit = async (values: AppointmentFormValues) => {
+  const onSubmit: SubmitHandler<AppointmentFormValues> = async (values) => {
     const addons: string[] = []
     if (values.addon_album) addons.push('album')
     if (values.addon_thank_you_card) addons.push('thank_you_card')
@@ -184,10 +243,7 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
     const payload = {
       client_id: values.client_id,
       title: values.title,
-      starts_at: new Date(values.starts_at).toISOString(),
-      ends_at: values.multi_day && values.ends_at ? new Date(values.ends_at).toISOString() : null,
-      session_type_ids: values.session_type_ids,
-      session_time: values.session_time ?? null,
+      session_slots: values.session_slots,
       location: values.location ?? null,
       status: values.status,
       addons,
@@ -197,13 +253,18 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
       price: values.price || '0',
       notes: values.notes ?? null,
     }
-    if (appointment) {
-      await updateMutation.mutateAsync({ id: appointment.id, payload })
-    } else {
-      await createMutation.mutateAsync(payload)
+    try {
+      if (appointment) {
+        await updateMutation.mutateAsync({ id: appointment.id, payload })
+      } else {
+        await createMutation.mutateAsync(payload)
+        onCreated?.()
+      }
+      reset()
+      onClose()
+    } catch {
+      // error is already surfaced via the mutation's onError toast
     }
-    reset()
-    onClose()
   }
 
   return (
@@ -224,7 +285,7 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
               <div>
                 <Label>Client</Label>
                 <ClientCombobox
-                  key={appointment?.id ?? 'new'}
+                  key={appointment?.id ?? prefill?.client_id ?? 'new'}
                   value={clientId ?? ''}
                   onChange={(id) => setValue('client_id', id, { shouldValidate: true })}
                   initialName={existingClient?.name}
@@ -237,42 +298,6 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
                 <Label htmlFor="a_title">Title</Label>
                 <Input id="a_title" {...register('title')} className="bg-input border text-foreground mt-1" />
                 {errors.title && <p className="text-xs text-red-400 mt-1">{errors.title.message}</p>}
-              </div>
-
-              {/* Dates */}
-              <div className="space-y-3">
-                <div>
-                  <Label htmlFor="a_starts_at">Start date</Label>
-                  <Input id="a_starts_at" type="date" {...register('starts_at')} className="bg-input border text-foreground mt-1" />
-                  {errors.starts_at && <p className="text-xs text-red-400 mt-1">{errors.starts_at.message}</p>}
-                </div>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" {...register('multi_day')} className="rounded" />
-                  <span className="text-sm text-foreground">Multi-day shoot</span>
-                </label>
-                {watch('multi_day') && (
-                  <div>
-                    <Label htmlFor="a_ends_at">End date</Label>
-                    <Input id="a_ends_at" type="date" {...register('ends_at')} className="bg-input border text-foreground mt-1" />
-                  </div>
-                )}
-              </div>
-
-              {/* Session Time */}
-              <div>
-                <Label>Session time</Label>
-                <div className="flex gap-3 mt-2 flex-wrap">
-                  {(['morning', 'afternoon', 'evening'] as const).map(t => (
-                    <label key={t} className="flex items-center gap-1.5 cursor-pointer">
-                      <input type="radio" value={t} {...register('session_time')} className="accent-[color:var(--brand-from)]" />
-                      <span className="text-sm text-foreground capitalize">{t}</span>
-                    </label>
-                  ))}
-                  <label className="flex items-center gap-1.5 cursor-pointer ml-2">
-                    <input type="radio" value="" {...register('session_time')} className="accent-[color:var(--brand-from)]" />
-                    <span className="text-sm text-muted-foreground">Any</span>
-                  </label>
-                </div>
               </div>
 
               {/* Location */}
@@ -289,7 +314,7 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
               {/* Status */}
               <div>
                 <Label>Status</Label>
-                <Select value={watch('status') ?? 'pending'} onValueChange={(v) => setValue('status', v as AppointmentFormValues['status'])}>
+                <Select value={watch('status') ?? 'pending'} onValueChange={(v) => setValue('status', v as AppointmentFormValues['status'], { shouldValidate: true })}>
                   <SelectTrigger className="bg-input border text-foreground mt-1">
                     <SelectValue />
                   </SelectTrigger>
@@ -299,36 +324,6 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
                     <SelectItem value="cancelled">Cancelled</SelectItem>
                   </SelectContent>
                 </Select>
-              </div>
-
-              {/* Session Types */}
-              <div>
-                <Label>Session types</Label>
-                {sessionTypes.length === 0 ? (
-                  <p className="text-xs text-muted-foreground mt-2">No session types configured yet.</p>
-                ) : (
-                  <div className="mt-2 space-y-1.5">
-                    {sessionTypes.map(st => {
-                      const ids: string[] = watch('session_type_ids') ?? []
-                      return (
-                        <label key={st.id} className="flex items-center gap-2 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={ids.includes(st.id)}
-                            onChange={e => {
-                              const next = e.target.checked
-                                ? [...ids, st.id]
-                                : ids.filter(id => id !== st.id)
-                              setValue('session_type_ids', next)
-                            }}
-                            className="rounded"
-                          />
-                          <span className="text-sm text-foreground">{st.name}</span>
-                        </label>
-                      )
-                    })}
-                  </div>
-                )}
               </div>
 
               {/* Add-ons */}
@@ -392,6 +387,165 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
             </div>
           </div>
 
+          {/* Session Slots */}
+          <div className="space-y-3 sm:col-span-2">
+            <Label>Sessions</Label>
+            {slotFields.map((field, index) => {
+              const slotTypeId = watch(`session_slots.${index}.session_type_id`)
+              const slotDate = watch(`session_slots.${index}.date`)
+              const availDays = getAvailableDays(slotTypeId)
+              const dateAllowed = isDateAllowed(slotDate, availDays)
+              const slotTime = watch(`session_slots.${index}.time`) ?? ''
+              const slotTimeSlot = watch(`session_slots.${index}.time_slot`)
+
+              const overlappingAppts = slotDate && slotTimeSlot
+                ? allAppointments.filter(a =>
+                    a.id !== appointment?.id &&
+                    a.session_slots.some(s => s.date === slotDate && s.time_slot === slotTimeSlot)
+                  )
+                : []
+
+              return (
+                <div key={field.id}>
+                  <div className="flex flex-wrap gap-2 items-start p-3 rounded-lg border border-border bg-muted/30">
+                    {/* Session type */}
+                    <div className="flex-1 min-w-[160px]">
+                      <Select
+                        value={watch(`session_slots.${index}.session_type_id`) || ''}
+                        onValueChange={(v) => setValue(`session_slots.${index}.session_type_id`, v as string, { shouldValidate: true })}
+                      >
+                        <SelectTrigger className="bg-input border text-foreground h-9 text-sm">
+                          <SelectValue>
+                            {(value: string | null) => {
+                              if (!value) return <span className="text-muted-foreground">Select session type</span>
+                              return sessionTypes.find((st) => st.id === value)?.name ?? value
+                            }}
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent className="bg-popover border text-popover-foreground">
+                          {sessionTypes.map(st => (
+                            <SelectItem key={st.id} value={st.id}>{st.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {errors.session_slots?.[index]?.session_type_id && (
+                        <p className="text-xs text-red-400 mt-1">{errors.session_slots[index]?.session_type_id?.message}</p>
+                      )}
+                    </div>
+
+                    {/* Date */}
+                    <div className="flex-1 min-w-[140px]">
+                      <Input
+                        type="date"
+                        {...register(`session_slots.${index}.date`)}
+                        className="bg-input border text-foreground h-9 text-sm"
+                      />
+                      {slotDate && !dateAllowed && (
+                        <p className="text-xs text-red-400 mt-1">
+                          Not available on {DAY_NAMES[getDay(parseISO(slotDate)) === 0 ? 6 : getDay(parseISO(slotDate)) - 1]}.
+                          Available: {availDays.map(d => DAY_NAMES[d].slice(0, 3)).join(', ')}
+                        </p>
+                      )}
+                      {errors.session_slots?.[index]?.date && (
+                        <p className="text-xs text-red-400 mt-1">{errors.session_slots[index]?.date?.message}</p>
+                      )}
+                    </div>
+
+                    {/* All day checkbox */}
+                    <label className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer whitespace-nowrap select-none self-center">
+                      <input
+                        type="checkbox"
+                        checked={slotTimeSlot === 'all_day'}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setValue(`session_slots.${index}.time`, undefined)
+                            setValue(`session_slots.${index}.time_slot`, 'all_day')
+                          } else {
+                            setValue(`session_slots.${index}.time_slot`, 'morning')
+                          }
+                        }}
+                        className="h-3.5 w-3.5 rounded accent-brand"
+                      />
+                      All day
+                    </label>
+
+                    {/* Precise time — hidden when all_day */}
+                    {slotTimeSlot !== 'all_day' && (
+                      <div className="w-[120px]">
+                        <Input
+                          type="time"
+                          value={slotTime}
+                          onChange={(e) => {
+                            const t = e.target.value
+                            setValue(`session_slots.${index}.time`, t || undefined)
+                            setValue(`session_slots.${index}.time_slot`, t ? deriveTimeSlot(t) : 'morning')
+                          }}
+                          className="bg-input border text-foreground h-9 text-sm"
+                        />
+                      </div>
+                    )}
+
+                    {/* Time of day — dropdown when no precise time, label when time is set */}
+                    {slotTimeSlot !== 'all_day' && (
+                      !slotTime ? (
+                        <div className="w-[130px]">
+                          <Select
+                            value={slotTimeSlot}
+                            onValueChange={(v) => setValue(`session_slots.${index}.time_slot`, v as 'morning' | 'afternoon' | 'evening')}
+                          >
+                            <SelectTrigger className="bg-input border text-foreground h-9 text-sm">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent className="bg-popover border text-popover-foreground">
+                              <SelectItem value="morning">Morning</SelectItem>
+                              <SelectItem value="afternoon">Afternoon</SelectItem>
+                              <SelectItem value="evening">Evening</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      ) : (
+                        <div className="w-[130px] h-9 flex items-center px-2 rounded-md border border-border bg-muted/30 text-sm text-muted-foreground capitalize">
+                          {deriveTimeSlot(slotTime)}
+                        </div>
+                      )
+                    )}
+
+                    {/* Remove button */}
+                    {slotFields.length > 1 && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive h-9 px-2"
+                        onClick={() => removeSlot(index)}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                  {overlappingAppts.length > 0 && (
+                    <p className="text-xs text-yellow-500 mt-1 px-1">
+                      ⚠ Overlaps with: {overlappingAppts.map(a => `"${a.title}"`).join(', ')} ({slotTimeSlot}, {slotDate})
+                    </p>
+                  )}
+                </div>
+              )
+            })}
+
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const firstDate = watch('session_slots.0.date') ?? ''
+                appendSlot({ session_type_id: '', date: firstDate, time_slot: 'morning', time: undefined })
+              }}
+            >
+              <Plus className="h-4 w-4 mr-1" />
+              Add session type
+            </Button>
+          </div>
+
           {/* Notes — full width */}
           <div>
             <Label htmlFor="a_notes">Notes</Label>
@@ -403,11 +557,22 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
             />
           </div>
 
-          <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="ghost" onClick={onClose} className="text-muted-foreground">Cancel</Button>
-            <Button type="submit" disabled={isSubmitting}>
-              {appointment ? 'Save changes' : 'Create appointment'}
-            </Button>
+          <div className="flex items-center justify-between pt-2">
+            {appointment && onDelete ? (
+              <button
+                type="button"
+                onClick={() => { onClose(); onDelete(appointment) }}
+                className="text-sm text-transparent bg-gradient-to-r from-rose-400 to-pink-500 bg-clip-text hover:opacity-80"
+              >
+                Delete appointment
+              </button>
+            ) : <span />}
+            <div className="flex gap-2">
+              <Button type="button" variant="ghost" onClick={onClose} className="text-muted-foreground">Cancel</Button>
+              <Button type="submit" disabled={isSubmitting}>
+                {appointment ? 'Save changes' : 'Create appointment'}
+              </Button>
+            </div>
           </div>
         </form>
       </DialogContent>
@@ -415,17 +580,278 @@ function AppointmentModal({ open, onClose, appointment }: AppointmentModalProps)
   )
 }
 
+type CalendarEvent = { id: string; title: string; start: Date; end: Date; resource: Appointment }
+
+function CalendarToolbar({ label, onNavigate, onView, view }: ToolbarProps<CalendarEvent>) {
+  const views: View[] = ['month', 'week', 'day', 'agenda']
+  return (
+    <div className="flex items-center justify-between mb-5">
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={() => onNavigate('PREV')}
+          className="flex h-8 w-8 items-center justify-center rounded-lg border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </button>
+        <button
+          onClick={() => onNavigate('TODAY')}
+          className="px-3 h-8 rounded-lg border border-border text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+        >
+          Today
+        </button>
+        <button
+          onClick={() => onNavigate('NEXT')}
+          className="flex h-8 w-8 items-center justify-center rounded-lg border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+        >
+          <ChevronRight className="h-4 w-4" />
+        </button>
+      </div>
+
+      <span className="text-base font-semibold text-foreground tracking-tight">{label}</span>
+
+      <div className="flex rounded-lg overflow-hidden border border-border">
+        {views.map(v => (
+          <button
+            key={v}
+            onClick={() => onView(v)}
+            className={`px-3 h-8 text-xs font-medium capitalize transition-colors ${
+              view === v
+                ? 'bg-accent text-foreground'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
+            }`}
+          >
+            {v}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+const EVENT_COLORS: Record<string, { bg: string; color: string }> = {
+  confirmed: { bg: 'var(--brand-from)', color: '#ffffff' },
+  pending:   { bg: '#f59e0b',           color: '#ffffff' },
+  cancelled: { bg: 'var(--muted-foreground)', color: 'var(--card)' },
+}
+
+function eventPropGetter(event: CalendarEvent) {
+  const c = EVENT_COLORS[event.resource?.status] ?? EVENT_COLORS.pending
+  return { style: { backgroundColor: c.bg, color: c.color } }
+}
+
+function generateICS(a: Appointment): string {
+  const now = new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15) + 'Z'
+  const isAllDay = a.session_slots.length > 0 && a.session_slots.every(s => s.time_slot === 'all_day')
+
+  let dtStart: string
+  let dtEnd: string
+
+  if (isAllDay) {
+    const date = a.starts_at.slice(0, 10).replace(/-/g, '')
+    const nextDay = new Date(a.starts_at)
+    nextDay.setUTCDate(nextDay.getUTCDate() + 1)
+    dtStart = `DTSTART;VALUE=DATE:${date}`
+    dtEnd = `DTEND;VALUE=DATE:${nextDay.toISOString().slice(0, 10).replace(/-/g, '')}`
+  } else {
+    const start = new Date(a.starts_at)
+    const end = a.ends_at ? new Date(a.ends_at) : new Date(start.getTime() + 60 * 60 * 1000)
+    dtStart = `DTSTART:${start.toISOString().replace(/[-:.]/g, '').slice(0, 15)}Z`
+    dtEnd = `DTEND:${end.toISOString().replace(/[-:.]/g, '').slice(0, 15)}Z`
+  }
+
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//weCapture4U//EN',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    'BEGIN:VEVENT',
+    `UID:${a.id}@wecapture4u`,
+    `DTSTAMP:${now}`,
+    dtStart,
+    dtEnd,
+    `SUMMARY:${a.title}`,
+  ]
+  if (a.location) lines.push(`LOCATION:${a.location}`)
+  if (a.notes) lines.push(`DESCRIPTION:${a.notes.replace(/\n/g, '\\n')}`)
+  lines.push('END:VEVENT', 'END:VCALENDAR')
+  return lines.join('\r\n')
+}
+
+function openInCalendar(a: Appointment) {
+  const url = 'data:text/calendar;charset=utf-8,' + encodeURIComponent(generateICS(a))
+  window.open(url, '_blank')
+}
+
+const TIME_SLOT_LABELS: Record<string, string> = {
+  morning: 'Morning',
+  afternoon: 'Afternoon',
+  evening: 'Evening',
+  all_day: 'All Day',
+}
+
+const ADDON_LABELS: Record<string, string> = {
+  album: 'Album',
+  thank_you_card: 'Thank You Card',
+  enlarged_photos: 'Enlarged Photos',
+}
+
+function RequestsTab({ onConfirm }: { onConfirm: (r: BookingRequest) => void }) {
+  const [statusFilter, setStatusFilter] = useState<'pending' | 'confirmed' | 'rejected'>('pending')
+  const [rejectingId, setRejectingId] = useState<string | null>(null)
+  const [rejectNotes, setRejectNotes] = useState('')
+  const { data: requests = [], isLoading } = useBookingRequests(statusFilter)
+  const { data: sessionTypes = [] } = useSessionTypes()
+  const updateRequest = useUpdateBookingRequest()
+
+  const sessionTypeName = (id: string | null) =>
+    id ? (sessionTypes.find(st => st.id === id)?.name ?? '—') : '—'
+
+  const handleReject = () => {
+    if (!rejectingId) return
+    updateRequest.mutate(
+      { id: rejectingId, status: 'rejected', admin_notes: rejectNotes || undefined },
+      {
+        onSettled: () => {
+          setRejectingId(null)
+          setRejectNotes('')
+        },
+      },
+    )
+  }
+
+  const FILTERS = ['pending', 'confirmed', 'rejected'] as const
+
+  if (isLoading) return null
+
+  return (
+    <div className="space-y-4">
+      {/* Status filter */}
+      <div className="flex rounded-lg overflow-hidden border w-fit">
+        {FILTERS.map(f => (
+          <button
+            key={f}
+            onClick={() => setStatusFilter(f)}
+            className={`px-3 py-1.5 text-sm capitalize ${statusFilter === f ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+          >
+            {f}
+          </button>
+        ))}
+      </div>
+
+      {/* Table */}
+      <div className="rounded-xl bg-card border overflow-hidden">
+        {requests.length === 0 ? (
+          <p className="p-6 text-sm text-center text-muted-foreground">No {statusFilter} requests.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="border-b border">
+              <tr className="text-left">
+                <th className="px-4 py-3 text-muted-foreground font-medium">Client</th>
+                <th className="px-4 py-3 text-muted-foreground font-medium">Preferred Date</th>
+                <th className="px-4 py-3 text-muted-foreground font-medium">Time Slot</th>
+                <th className="px-4 py-3 text-muted-foreground font-medium">Session Type</th>
+                <th className="px-4 py-3 text-muted-foreground font-medium">Add-ons</th>
+                <th className="px-4 py-3 text-muted-foreground font-medium">Message</th>
+                <th className="px-4 py-3 text-muted-foreground font-medium">Submitted</th>
+                {statusFilter === 'pending' && <th className="px-4 py-3" />}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {requests.map(r => (
+                <tr key={r.id} className="hover:bg-muted/30">
+                  <td className="px-4 py-3 font-medium text-foreground">{r.client_name}</td>
+                  <td className="px-4 py-3 text-foreground/80 whitespace-nowrap">
+                    {format(new Date(r.preferred_date + 'T00:00:00'), 'MMM d, yyyy')}
+                  </td>
+                  <td className="px-4 py-3 text-foreground/80">{TIME_SLOT_LABELS[r.time_slot] ?? r.time_slot}</td>
+                  <td className="px-4 py-3 text-muted-foreground">{sessionTypeName(r.session_type_id)}</td>
+                  <td className="px-4 py-3 text-muted-foreground">
+                    {r.addons.length > 0 ? r.addons.map(a => ADDON_LABELS[a] ?? a).join(', ') : '—'}
+                  </td>
+                  <td className="px-4 py-3 text-muted-foreground max-w-[200px]">
+                    {r.message
+                      ? <span title={r.message}>{r.message.length > 60 ? r.message.slice(0, 60) + '\u2026' : r.message}</span>
+                      : '—'}
+                  </td>
+                  <td className="px-4 py-3 text-muted-foreground whitespace-nowrap text-xs">
+                    {formatDistanceToNow(new Date(r.created_at), { addSuffix: true })}
+                  </td>
+                  {statusFilter === 'pending' && (
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
+                      <div className="flex justify-end gap-2">
+                        <Button size="sm" onClick={() => onConfirm(r)}>Confirm</Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => { setRejectingId(r.id); setRejectNotes('') }}
+                        >
+                          Reject
+                        </Button>
+                      </div>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Reject modal */}
+      <Dialog open={!!rejectingId} onOpenChange={(o) => { if (!o) { setRejectingId(null); setRejectNotes('') } }}>
+        <DialogContent className="bg-card border text-foreground sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Reject booking request</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="reject-notes">Notes to client (optional)</Label>
+              <textarea
+                id="reject-notes"
+                value={rejectNotes}
+                onChange={e => setRejectNotes(e.target.value)}
+                rows={3}
+                placeholder="Reason for rejection\u2026"
+                className="w-full mt-1 rounded-md bg-input border text-foreground px-3 py-2 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="ghost" onClick={() => { setRejectingId(null); setRejectNotes('') }}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={updateRequest.isPending}
+                onClick={handleReject}
+              >
+                Reject
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
 export function Appointments() {
-  const [view, setView] = useState<'calendar' | 'list'>('list')
+  const [view, setView] = useState<'calendar' | 'list'>('calendar')
   const [calendarView, setCalendarView] = useState<View>('month')
+  const [calendarDate, setCalendarDate] = useState(new Date())
   const [modalOpen, setModalOpen] = useState(false)
   const [editingAppointment, setEditingAppointment] = useState<Appointment | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Appointment | null>(null)
 
+  const [activeTab, setActiveTab] = useState<'appointments' | 'requests'>('appointments')
+  const [confirmingRequest, setConfirmingRequest] = useState<BookingRequest | null>(null)
+  const updateBookingRequest = useUpdateBookingRequest()
+
   const { data: appointments = [], isLoading } = useAppointments()
   const deleteMutation = useDeleteAppointment()
 
-  const events = appointments.map(a => ({
+  const events: CalendarEvent[] = appointments.map(a => ({
     id: a.id,
     title: a.title,
     start: parseISO(a.starts_at),
@@ -449,6 +875,41 @@ export function Appointments() {
     setDeleteTarget(null)
   }
 
+  const requestPrefill = useMemo(() => {
+    if (!confirmingRequest) return undefined
+    return {
+      client_id: confirmingRequest.client_id,
+      session_slots: confirmingRequest.session_slots.length > 0
+        ? confirmingRequest.session_slots.map(s => ({
+            session_type_id: s.session_type_id,
+            date: s.date,
+            time_slot: s.time_slot,
+          }))
+        : [{
+            session_type_id: '',
+            date: String(confirmingRequest.preferred_date),
+            time_slot: 'morning' as const,
+          }],
+      addon_album: confirmingRequest.addons.includes('album'),
+      addon_thank_you_card: confirmingRequest.addons.includes('thank_you_card'),
+      addon_enlarged_photos: confirmingRequest.addons.includes('enlarged_photos'),
+      notes: confirmingRequest.message ?? undefined,
+      status: 'confirmed' as const,
+    }
+  }, [confirmingRequest])
+
+  const handleAppointmentCreated = () => {
+    if (!confirmingRequest) return
+    updateBookingRequest.mutate({ id: confirmingRequest.id, status: 'confirmed' })
+    setConfirmingRequest(null)
+  }
+
+  const handleConfirmRequest = (request: BookingRequest) => {
+    setConfirmingRequest(request)
+    setEditingAppointment(null)
+    setModalOpen(true)
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -458,43 +919,68 @@ export function Appointments() {
             </div>
             <h1 className="text-2xl font-semibold text-foreground">Appointments</h1>
           </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          <div className="flex rounded-lg overflow-hidden border">
-            <button
-              onClick={() => setView('calendar')}
-              className={`px-3 py-1.5 text-sm ${view === 'calendar' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-            >
-              Calendar
-            </button>
-            <button
-              onClick={() => setView('list')}
-              className={`px-3 py-1.5 text-sm ${view === 'list' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-            >
-              List
-            </button>
+        {activeTab === 'appointments' && (
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex rounded-lg overflow-hidden border">
+              <button
+                onClick={() => setView('calendar')}
+                className={`px-3 py-1.5 text-sm ${view === 'calendar' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                Calendar
+              </button>
+              <button
+                onClick={() => setView('list')}
+                className={`px-3 py-1.5 text-sm ${view === 'list' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                List
+              </button>
+            </div>
+            <Button onClick={openCreate}>
+              <Plus className="h-4 w-4 mr-1" />
+              New Appointment
+            </Button>
           </div>
-          <Button onClick={openCreate}>
-            <Plus className="h-4 w-4 mr-1" />
-            New Appointment
-          </Button>
-        </div>
+        )}
       </div>
 
+      <div className="flex rounded-lg overflow-hidden border w-fit">
+        <button
+          onClick={() => setActiveTab('appointments')}
+          className={`px-3 py-1.5 text-sm ${activeTab === 'appointments' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+        >
+          Appointments
+        </button>
+        <button
+          onClick={() => setActiveTab('requests')}
+          className={`px-3 py-1.5 text-sm ${activeTab === 'requests' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+        >
+          Requests
+        </button>
+      </div>
+
+      {activeTab === 'appointments' ? (
+      <>
       {view === 'calendar' ? (
-        <div className="rounded-xl bg-card border p-4" style={{ height: 600 }}>
-          <Calendar
+        <div className="rounded-2xl bg-card border border-border p-5" style={{ height: 660 }}>
+          <Calendar<CalendarEvent>
             localizer={localizer}
             events={events}
             view={calendarView}
             onView={setCalendarView}
+            date={calendarDate}
+            onNavigate={setCalendarDate}
             onSelectEvent={(event) => openEdit(event.resource)}
-            style={{ background: 'transparent' }}
+            eventPropGetter={eventPropGetter}
+            components={{ toolbar: CalendarToolbar }}
+            style={{ height: '100%' }}
           />
         </div>
       ) : (
         <div className="rounded-xl bg-card border overflow-hidden">
           {isLoading ? (
-            <p className="p-6 text-sm text-muted-foreground">Loading...</p>
+            <table className="w-full text-sm">
+              <tbody>{Array.from({ length: 6 }).map((_, i) => <SkeletonRow key={i} cols={6} />)}</tbody>
+            </table>
           ) : appointments.length === 0 ? (
             <p className="p-6 text-sm text-muted-foreground">No appointments yet.</p>
           ) : (
@@ -554,12 +1040,23 @@ export function Appointments() {
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right whitespace-nowrap">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setDeleteTarget(a) }}
-                        className="text-xs text-transparent bg-gradient-to-r from-rose-400 to-pink-500 bg-clip-text hover:opacity-80"
-                      >
-                        Delete
-                      </button>
+                      <div className="flex items-center justify-end gap-6">
+                        {a.status === 'confirmed' && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); openInCalendar(a) }}
+                            className="text-muted-foreground hover:text-foreground transition-colors"
+                            title="Add to Calendar"
+                          >
+                            <CalendarPlus className="h-4 w-4" />
+                          </button>
+                        )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(a) }}
+                          className="text-xs text-transparent bg-gradient-to-r from-rose-400 to-pink-500 bg-clip-text hover:opacity-80"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -568,11 +1065,18 @@ export function Appointments() {
           )}
         </div>
       )}
+      </>
+      ) : (
+        <RequestsTab onConfirm={handleConfirmRequest} />
+      )}
 
       <AppointmentModal
         open={modalOpen}
-        onClose={() => setModalOpen(false)}
+        onClose={() => { setModalOpen(false); setConfirmingRequest(null) }}
         appointment={editingAppointment}
+        prefill={requestPrefill}
+        onCreated={confirmingRequest ? handleAppointmentCreated : undefined}
+        onDelete={(a) => setDeleteTarget(a)}
       />
 
       <ConfirmDialog
