@@ -2,8 +2,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   fetchJobs, fetchJob, createJob, updateJob, deleteJob,
-  fetchJobStages, reorderJobStages, deleteJobStage,
+  fetchJobStages, createJobStage, updateJobStage, reorderJobStages, deleteJobStage,
+  fetchAlbumStages, createAlbumStage, updateAlbumStage, reorderAlbumStages, deleteAlbumStage,
   type Job, type JobCreatePayload, type JobUpdatePayload, type StagePositionItem,
+  type AlbumStageCreatePayload, type AlbumStageUpdatePayload, type AlbumStagePositionItem,
 } from '@/api/jobs'
 import { getApiErrorMessage } from '@/lib/apiError'
 
@@ -60,6 +62,25 @@ export function useJobStages() {
   return useQuery({ queryKey: ['job-stages'], queryFn: fetchJobStages })
 }
 
+export function useCreateJobStage() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: createJobStage,
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['job-stages'] }); toast.success('Stage created') },
+    onError: () => toast.error('Failed to create stage'),
+  })
+}
+
+export function useUpdateJobStage() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: { name?: string; color?: string; is_terminal?: boolean } }) =>
+      updateJobStage(id, payload),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['job-stages'] }); toast.success('Stage updated') },
+    onError: () => toast.error('Failed to update stage'),
+  })
+}
+
 export function useReorderJobStages() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -91,6 +112,48 @@ export function useDeleteJobStage() {
   return useMutation({
     mutationFn: deleteJobStage,
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['job-stages'] }); toast.success('Stage deleted') },
+    onError: (error: unknown) => {
+      toast.error(getApiErrorMessage(error, 'Cannot delete — jobs are assigned to this stage'))
+    },
+  })
+}
+
+export function useAlbumStages() {
+  return useQuery({ queryKey: ['album-stages'], queryFn: fetchAlbumStages })
+}
+
+export function useCreateAlbumStage() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: createAlbumStage,
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['album-stages'] }); toast.success('Stage created') },
+    onError: () => toast.error('Failed to create album stage'),
+  })
+}
+
+export function useUpdateAlbumStage() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: AlbumStageUpdatePayload }) => updateAlbumStage(id, payload),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['album-stages'] }); toast.success('Stage updated') },
+    onError: () => toast.error('Failed to update album stage'),
+  })
+}
+
+export function useReorderAlbumStages() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (stages: AlbumStagePositionItem[]) => reorderAlbumStages(stages),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['album-stages'] }),
+    onError: () => toast.error('Failed to reorder album stages'),
+  })
+}
+
+export function useDeleteAlbumStage() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: deleteAlbumStage,
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['album-stages'] }); toast.success('Stage deleted') },
     onError: (error: unknown) => {
       toast.error(getApiErrorMessage(error, 'Cannot delete — jobs are assigned to this stage'))
     },

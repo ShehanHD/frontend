@@ -3,6 +3,8 @@ import Landing from '@/pages/public/Landing'
 import Gallery from '@/pages/public/Gallery'
 import AdminLogin from '@/pages/auth/AdminLogin'
 import ClientLogin from '@/pages/auth/ClientLogin'
+import ClientRegister from '@/pages/auth/ClientRegister'
+import VerifyEmail from '@/pages/auth/VerifyEmail'
 import ForgotPassword from '@/pages/auth/ForgotPassword'
 import ResetPassword from '@/pages/auth/ResetPassword'
 import BiometricSetup from '@/pages/auth/BiometricSetup'
@@ -24,6 +26,7 @@ import { Dashboard } from '@/pages/admin/Dashboard'
 import { Appointments } from '@/pages/admin/Appointments'
 import { Accounting } from '@/pages/admin/Accounting'
 import { Jobs } from '@/pages/admin/Jobs'
+import { AlbumJobs } from '@/pages/admin/AlbumJobs'
 import { JobDetail } from '@/pages/admin/JobDetail'
 import { Clients } from '@/pages/admin/Clients'
 import { ClientDetail } from '@/pages/admin/ClientDetail'
@@ -44,6 +47,8 @@ export const router = createBrowserRouter([
 
   // Client auth routes
   { path: '/client/login', element: <ClientLogin /> },
+  { path: '/client/register', element: <ClientRegister /> },
+  { path: '/client/verify-email', element: <VerifyEmail /> },
   { path: '/client/forgot-password', element: <ForgotPassword /> },
   { path: '/client/reset-password', element: <ResetPassword /> },
 
@@ -62,6 +67,7 @@ export const router = createBrowserRouter([
           { path: 'portfolio', element: <AdminPortfolio /> },
           { path: 'jobs', element: <Jobs /> },
           { path: 'jobs/:id', element: <JobDetail /> },
+          { path: 'albums', element: <AlbumJobs /> },
           { path: 'clients', element: <Clients /> },
           { path: 'clients/:id', element: <ClientDetail /> },
           { path: 'accounting', element: <Accounting /> },
