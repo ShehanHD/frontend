@@ -1,54 +1,36 @@
 // frontend/src/components/public/StatsSection.tsx
-const STATS = [
-  { value: '500', accent: '+', label: 'Sessions completed' },
-  { value: '10', accent: '+', label: 'Years of experience' },
-  { value: '5', accent: ' ★', label: 'Average client rating' },
-  { value: '48', accent: 'h', label: 'Photo delivery time' },
-]
+import { DEFAULT_STATS } from '@/schemas/portfolio'
+import type { StatItem } from '@/schemas/portfolio'
 
-export function StatsSection() {
+export function StatsSection({ stats }: { stats?: StatItem[] }) {
+  const items = (stats && stats.length > 0 ? stats : DEFAULT_STATS)
+    .filter((s) => !s.label.toLowerCase().includes('rating'))
+
   return (
-    <section
-      style={{ background: 'var(--pub-light)', padding: '64px 24px' }}
-    >
-      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+    <section style={{ background: 'var(--pub-light)', padding: '64px 24px' }}>
+      <div style={{ maxWidth: 960, margin: '0 auto' }}>
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(2, 1fr)',
-            gap: 16,
+            gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+            gap: 14,
           }}
         >
-          {STATS.map((stat) => (
+          {items.map((stat, i) => (
             <div
-              key={stat.label}
+              key={i}
               style={{
                 background: 'var(--pub-card)',
                 border: '1px solid var(--pub-border)',
                 borderRadius: 16,
-                padding: '28px 20px',
+                padding: '28px 16px',
                 textAlign: 'center',
               }}
             >
-              <div
-                style={{
-                  fontSize: 36,
-                  fontWeight: 900,
-                  color: 'var(--pub-navy)',
-                  lineHeight: 1,
-                }}
-              >
-                {stat.value}
-                <span style={{ color: 'var(--pub-accent)' }}>{stat.accent}</span>
+              <div style={{ fontSize: 34, fontWeight: 900, color: 'var(--pub-navy)', lineHeight: 1 }}>
+                {stat.value}<span style={{ color: 'var(--pub-accent)' }}>{stat.accent}</span>
               </div>
-              <div
-                style={{
-                  marginTop: 8,
-                  fontSize: 13,
-                  color: 'var(--pub-muted)',
-                  lineHeight: 1.4,
-                }}
-              >
+              <div style={{ marginTop: 8, fontSize: 12, color: 'var(--pub-muted)', lineHeight: 1.4 }}>
                 {stat.label}
               </div>
             </div>

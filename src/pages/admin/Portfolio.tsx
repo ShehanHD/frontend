@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { useEffect, useRef, useState } from 'react'
+import { useForm, useFieldArray } from 'react-hook-form'
 import { Images } from 'lucide-react'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../../components/ui/tabs'
 import { Button } from '../../components/ui/button'
@@ -16,7 +16,8 @@ import {
   useUploadOgImage,
   useDeleteOgImage,
 } from '../../hooks/usePortfolio'
-import type { Category } from '../../schemas/portfolio'
+import { DEFAULT_STATS } from '../../schemas/portfolio'
+import type { Category, StatItem } from '../../schemas/portfolio'
 
 // ─── Tab 1: Hero Carousel ─────────────────────────────────────────────────────
 
@@ -184,7 +185,7 @@ function CategoryPhotosTab({
 
   return (
     <div className="space-y-4">
-      <Select value={selectedCatId || '__none__'} onValueChange={(v) => setSelectedCatId(v === '__none__' ? '' : v)}>
+      <Select value={selectedCatId || '__none__'} onValueChange={(v) => setSelectedCatId(v === '__none__' || v === null ? '' : v)}>
         <SelectTrigger className="w-full bg-input border text-foreground">
           <SelectValue placeholder="Select category…" />
         </SelectTrigger>
@@ -206,6 +207,21 @@ function CategoryPhotosTab({
 
 // ─── Tab 4: About & Settings ──────────────────────────────────────────────────
 
+type AboutFormValues = {
+  tagline: string
+  bio: string
+  instagram_url: string
+  facebook_url: string
+  contact_headline: string
+  contact_email: string
+  meta_title: string
+  meta_description: string
+  stats: StatItem[]
+  city: string
+  country: string
+  phone: string
+}
+
 function AboutSettingsTab() {
   const { data: settings } = useAboutSettings()
   const updateMutation = useUpdateAboutSettings()
@@ -213,26 +229,54 @@ function AboutSettingsTab() {
   const deleteOgImageMutation = useDeleteOgImage()
   const ogImageInputRef = useRef<HTMLInputElement>(null)
 
-  const { register, handleSubmit } = useForm({
+  const { register, handleSubmit, control, reset } = useForm<AboutFormValues>({
     defaultValues: {
-      tagline: settings?.tagline ?? '',
-      bio: settings?.bio ?? '',
-      instagram_url: settings?.instagram_url ?? '',
-      facebook_url: settings?.facebook_url ?? '',
-      contact_headline: settings?.contact_headline ?? '',
-      contact_email: settings?.contact_email ?? '',
-      meta_title: settings?.meta_title ?? '',
-      meta_description: settings?.meta_description ?? '',
+      tagline: '',
+      bio: '',
+      instagram_url: '',
+      facebook_url: '',
+      contact_headline: '',
+      contact_email: '',
+      meta_title: '',
+      meta_description: '',
+      stats: DEFAULT_STATS,
+      city: '',
+      country: '',
+      phone: '',
     },
   })
 
+  useEffect(() => {
+    if (settings) {
+      reset({
+        tagline: settings.tagline ?? '',
+        bio: settings.bio ?? '',
+        instagram_url: settings.instagram_url ?? '',
+        facebook_url: settings.facebook_url ?? '',
+        contact_headline: settings.contact_headline ?? '',
+        contact_email: settings.contact_email ?? '',
+        meta_title: settings.meta_title ?? '',
+        meta_description: settings.meta_description ?? '',
+        stats: settings.stats && settings.stats.length > 0 ? settings.stats : DEFAULT_STATS,
+        city: settings.city ?? '',
+        country: settings.country ?? '',
+        phone: settings.phone ?? '',
+      })
+    }
+  }, [settings, reset])
+
+  const { fields: statFields } = useFieldArray({ control, name: 'stats' })
+
   return (
     <form
-      onSubmit={handleSubmit((data) =>
-        updateMutation.mutate(
-          Object.fromEntries(Object.entries(data).map(([k, v]) => [k, v || null])),
-        ),
-      )}
+      onSubmit={handleSubmit((data) => {
+        const formData = Object.fromEntries(
+          Object.entries(data)
+            .filter(([k]) => k !== 'stats')
+            .map(([k, v]) => [k, (v as string) || null])
+        )
+        updateMutation.mutate({ ...formData, stats: data.stats })
+      })}
       className="space-y-4 max-w-lg"
     >
       {(
@@ -243,6 +287,9 @@ function AboutSettingsTab() {
           { name: 'contact_headline', label: 'Contact Headline' },
           { name: 'contact_email', label: 'Contact Email' },
           { name: 'meta_title', label: 'Page Title (SEO)' },
+          { name: 'city', label: 'City (Local SEO)' },
+          { name: 'country', label: 'Country (Local SEO, e.g. Italy)' },
+          { name: 'phone', label: 'Phone (Local SEO)' },
         ] as const
       ).map(({ name, label }) => (
         <div key={name}>
@@ -315,6 +362,20 @@ function AboutSettingsTab() {
             }}
           />
         </div>
+      </div>
+
+      <div>
+        <label className="text-xs text-muted-foreground">Stats</label>
+        <div className="space-y-2 mt-1">
+          {statFields.map((field, i) => (
+            <div key={field.id} className="flex gap-2 items-center">
+              <input className="w-16 bg-input border rounded px-2 py-1 text-foreground text-sm" placeholder="500" {...register(`stats.${i}.value`)} />
+              <input className="w-12 bg-input border rounded px-2 py-1 text-foreground text-sm" placeholder="+" {...register(`stats.${i}.accent`)} />
+              <input className="flex-1 bg-input border rounded px-2 py-1 text-foreground text-sm" placeholder="Sessions completed" {...register(`stats.${i}.label`)} />
+            </div>
+          ))}
+        </div>
+        <p className="text-xs text-muted-foreground mt-1">Each stat: value (e.g. 500), accent (e.g. +), label (e.g. Sessions completed)</p>
       </div>
 
       <Button
